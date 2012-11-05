@@ -14,33 +14,14 @@ class Tiler
   end
 
   def generate(zoom, changeset_id, options = {})
-    tiles = changeset_tiles(changeset_id, zoom)
-    @@log.debug "Tiles to process: #{tiles.size}"
-
-    return -1 if options[:processing_tile_limit] and tiles.size > options[:processing_tile_limit]
+    #return -1 if options[:processing_tile_limit] and tiles.size > options[:processing_tile_limit]
 
     count = 0
 
     each_change(changeset_id) do |row|
-    end
-
-    tiles.each do |tile|
-      x, y = tile[0], tile[1]
-      lat1, lon1 = tile2latlon(x, y, zoom)
-      lat2, lon2 = tile2latlon(x + 1, y + 1, zoom)
-
-      geom = @conn.query("
-        SELECT ST_Intersection(
-          geom,
-          ST_SetSRID(ST_MakeBox2D(ST_MakePoint(#{lon2}, #{lat1}), ST_MakePoint(#{lon1}, #{lat2})), 4326))
-        FROM changesets WHERE id = #{changeset_id}").getvalue(0, 0)
-
-      if geom != '0107000020E610000000000000' and geom
-        @@log.debug "    Got geometry for tile (#{x}, #{y})"
-        @conn.query("INSERT INTO changeset_tiles (changeset_id, zoom, x, y, geom)
-          VALUES (#{changeset_id}, #{zoom}, #{x}, #{y}, '#{geom}')")
-        count += 1
-      end
+      tile_geom(changeset_id, row['current_geom'], box2d_to_bbox(row['current_box']), zoom) if row['current_geom']
+      tile_geom(changeset_id, row['new_geom'], box2d_to_bbox(row['new_box']), zoom) if row['new_geom']
+      #puts row
     end
 
     count
@@ -100,44 +81,47 @@ class Tiler
 
   protected
 
-  def each_change(changeset_id)
-    @conn.exec("DECLARE change_cursor CURSOR FOR SELECT id, ST_ FROM changes WHERE changeset_id = #{changeset_id}")
-    puts @conn.exec( "FETCH ALL IN myportal").inspect
-  end
+  def tile_geom(changeset_id, geom, bbox, zoom)
+    tiles = bbox_to_tiles(zoom, bbox)
+    #@@log.debug " Tiles to process: #{tiles.size}"
 
-  def changeset_tiles(changeset_id, zoom)
-    tiles = []
-    bboxes = change_bboxes(changeset_id)
-    @@log.debug "Change bboxes: #{bboxes.size}"
-    bboxes.collect {|bbox| tiles += bbox_to_tiles(zoom, bbox)}
-    tiles.uniq
-  end
+    tiles.each do |tile|
+      x, y = tile[0], tile[1]
+      lat1, lon1 = tile2latlon(x, y, zoom)
+      lat2, lon2 = tile2latlon(x + 1, y + 1, zoom)
 
-  def get_existing_tiles(changeset_id, zoom)
-    tiles = []
-    @conn.query("SELECT x, y
-        FROM changeset_tiles WHERE changeset_id = #{changeset_id} AND zoom = #{zoom}").to_a.each do |row|
-      tiles << [row['x'].to_i, row['y'].to_i]
+      geom = @conn.query("
+        SELECT ST_Intersection(
+          geom,
+          ST_SetSRID(ST_MakeBox2D(ST_MakePoint(#{lon2}, #{lat1}), ST_MakePoint(#{lon1}, #{lat2})), 4326))
+        FROM changesets WHERE id = #{changeset_id}").getvalue(0, 0)
+
+      if geom != '0107000020E610000000000000' and geom
+        @@log.debug "    Got geometry for tile (#{x}, #{y})"
+        @conn.query("INSERT INTO changeset_tiles (changeset_id, zoom, x, y, geom)
+          VALUES (#{changeset_id}, #{zoom}, #{x}, #{y}, '#{geom}')")
+        count += 1
+      end
     end
-    tiles
+  end
+
+  def each_change(changeset_id)
+    @conn.exec("DECLARE change_cursor CURSOR FOR
+        SELECT id,
+          current_geom::geometry AS current_geom,
+          new_geom::geometry AS new_geom,
+          Box2D(current_geom::geometry) AS current_box,
+          Box2D(new_geom::geometry) AS new_box
+        FROM changes
+        WHERE changeset_id = #{changeset_id} AND (NOT ST_IsEmpty(current_geom::geometry) OR
+          NOT ST_IsEmpty(new_geom::geometry))")
+    while (result = @conn.exec("FETCH NEXT IN change_cursor")).ntuples == 1 do
+      yield result.to_a[0]
+    end
   end
 
   def clear_summary_tiles(zoom)
     @conn.query("DELETE FROM summary_tiles WHERE zoom = #{zoom}").cmd_tuples
-  end
-
-  def change_bboxes(changeset_id)
-    bboxes = []
-    @conn.query("SELECT ST_XMin(current_geom::geometry) AS ymin, ST_XMax(current_geom::geometry) AS ymax,
-        ST_YMin(current_geom::geometry) AS xmin, ST_YMax(current_geom::geometry) AS xmax
-        FROM changes WHERE changeset_id = #{changeset_id}
-          UNION
-        SELECT ST_XMin(new_geom::geometry) AS ymin, ST_XMax(new_geom::geometry) AS ymax,
-        ST_YMin(new_geom::geometry) AS xmin, ST_YMax(new_geom::geometry) AS xmax
-        FROM changes WHERE changeset_id = #{changeset_id}").to_a.each do |row|
-      bboxes << row.merge(row) {|k, v| v.to_f}
-    end
-    bboxes.uniq
   end
 end
 
