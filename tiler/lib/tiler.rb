@@ -21,6 +21,9 @@ class Tiler
 
     count = 0
 
+    each_change(changeset_id) do |row|
+    end
+
     tiles.each do |tile|
       x, y = tile[0], tile[1]
       lat1, lon1 = tile2latlon(x, y, zoom)
@@ -87,6 +90,11 @@ class Tiler
   end
 
   protected
+
+  def each_change(changeset_id)
+    @conn.exec("DECLARE change_cursor CURSOR FOR SELECT id, ST_ FROM changes WHERE changeset_id = #{changeset_id}")
+    puts @conn.exec( "FETCH ALL IN myportal").inspect
+  end
 
   def changeset_tiles(changeset_id, zoom)
     tiles = []
