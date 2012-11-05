@@ -19,8 +19,8 @@ class Tiler
     count = 0
 
     each_change(changeset_id) do |row|
-      tile_geom(changeset_id, row['current_geom'], box2d_to_bbox(row['current_box']), zoom) if row['current_geom']
-      tile_geom(changeset_id, row['new_geom'], box2d_to_bbox(row['new_box']), zoom) if row['new_geom']
+      tile_change(changeset_id, row['id'], box2d_to_bbox(row['current_box']), zoom) if row['current_box']
+      tile_change(changeset_id, row['id'], box2d_to_bbox(row['new_box']), zoom) if row['new_box']
       #puts row
     end
 
@@ -81,8 +81,11 @@ class Tiler
 
   protected
 
-  def tile_geom(changeset_id, geom, bbox, zoom)
+  def tile_change(changeset_id, change_id, bbox, zoom)
+    count = 0
+    puts bbox.inspect
     tiles = bbox_to_tiles(zoom, bbox)
+
     #@@log.debug " Tiles to process: #{tiles.size}"
 
     tiles.each do |tile|
@@ -92,31 +95,40 @@ class Tiler
 
       geom = @conn.query("
         SELECT ST_Intersection(
-          geom,
-          ST_SetSRID(ST_MakeBox2D(ST_MakePoint(#{lon2}, #{lat1}), ST_MakePoint(#{lon1}, #{lat2})), 4326))
-        FROM changesets WHERE id = #{changeset_id}").getvalue(0, 0)
+          current_geom,
+          ST_SetSRID('BOX(#{lat1} #{lon1},#{lat2} #{lon2})'::box2d, 4326))
+        FROM changes WHERE id = #{change_id}").getvalue(0, 0)
 
       if geom != '0107000020E610000000000000' and geom
         @@log.debug "    Got geometry for tile (#{x}, #{y})"
-        @conn.query("INSERT INTO changeset_tiles (changeset_id, zoom, x, y, geom)
-          VALUES (#{changeset_id}, #{zoom}, #{x}, #{y}, '#{geom}')")
+        ensure_tile(changeset_id, x, y, zoom)
+        @conn.query("UPDATE changeset_tiles
+          SET geom = ST_Collect(geom::geometry, '#{geom}'::geometry)
+          WHERE changeset_id = #{changeset_id} AND x = #{x} AND y = #{y} AND zoom = #{zoom}")
         count += 1
       end
+    end
+    count
+  end
+
+  ##
+  # Creates a tile if it doesn't exist.
+  #
+  def ensure_tile(changeset_id, x, y, zoom)
+    if @conn.query("SELECT 1 FROM changeset_tiles
+      WHERE changeset_id = #{changeset_id} AND x = #{x} AND y = #{y} AND zoom = #{zoom}").ntuples == 0
+      @conn.query("INSERT INTO changeset_tiles (changeset_id, zoom, x, y)
+          VALUES (#{changeset_id}, #{zoom}, #{x}, #{y})")
     end
   end
 
   def each_change(changeset_id)
-    @conn.exec("DECLARE change_cursor CURSOR FOR
-        SELECT id,
-          current_geom::geometry AS current_geom,
-          new_geom::geometry AS new_geom,
+    for row in @conn.query("SELECT changeset_id, id,
           Box2D(current_geom::geometry) AS current_box,
           Box2D(new_geom::geometry) AS new_box
         FROM changes
-        WHERE changeset_id = #{changeset_id} AND (NOT ST_IsEmpty(current_geom::geometry) OR
-          NOT ST_IsEmpty(new_geom::geometry))")
-    while (result = @conn.exec("FETCH NEXT IN change_cursor")).ntuples == 1 do
-      yield result.to_a[0]
+        WHERE changeset_id = #{changeset_id} AND (current_geom IS NOT NULL OR new_geom IS NOT NULL)").to_a
+      yield row
     end
   end
 
